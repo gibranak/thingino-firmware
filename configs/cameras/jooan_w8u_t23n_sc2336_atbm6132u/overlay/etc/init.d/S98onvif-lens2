@@ -1,0 +1,80 @@
+#!/bin/sh
+# Second ONVIF device for the Jooan W8-U's second lens (sensor 1: ch2/ch3).
+#
+# TP-Link VIGI NVRs accept one ONVIF device per IP and always use port 80,
+# so lens 2 gets its own IP on a wlan0 alias and its own uhttpd on
+# <alias>:80 (the main uhttpd binds wlan0's own address, see
+# /etc/default/uhttpd). The docroot holds symlinks to the stock ONVIF CGI
+# plus its own onvif.json, which the CGI prefers over /etc/onvif.json.
+# A second wsd_simple_server (-u, bound to the alias) answers WS-Discovery
+# probes for it. Runs after S96onvif_discovery, which generates
+# /etc/onvif.json and whose stop kills every wsd_simple_server.
+#
+# Set ALIAS_IP to a free address on the camera's subnet (reserve it on the
+# router).
+
+DAEMON="uhttpd-lens2"
+PIDFILE="/var/run/uhttpd-lens2.pid"
+WSD_PIDFILE="/run/wsd_simple_server_lens2.pid"
+DOCROOT="/var/www-lens2"
+ALIAS_IF="wlan0:1"
+ALIAS_IP="192.168.1.85"
+ALIAS_MASK="255.255.255.0"
+EXTRA_PORT="8080"
+
+setup_docroot() {
+	mkdir -p "$DOCROOT/onvif"
+	chmod 755 "$DOCROOT" "$DOCROOT/onvif"
+	for f in /var/www/onvif/*; do
+		n=$(basename "$f")
+		[ "$n" = onvif.json ] && continue
+		if [ -L "$f" ] && [ "$(readlink "$f")" = onvif.cgi ]; then
+			ln -sfn /var/www/onvif/onvif.cgi "$DOCROOT/onvif/$n"
+		else
+			ln -sfn "$f" "$DOCROOT/onvif/$n"
+		fi
+	done
+
+	# Profile names must stay Profile_0/Profile_1: GetProfiles hands out
+	# those tokens and GetStreamUri looks profiles up by name.
+	c="$DOCROOT/onvif/onvif.json"
+	cp /etc/onvif.json "$c"
+	jct "$c" set server.port 80 >/dev/null
+	jct "$c" set server.ifs_override "$ALIAS_IF" >/dev/null
+	jct "$c" set events_enable 0 >/dev/null
+	jct "$c" set ptz.enable 0 >/dev/null
+	jct "$c" set profiles.stream0.url 'rtsp://%s:554/ch2' >/dev/null
+	jct "$c" set profiles.stream0.snapurl '' >/dev/null
+	jct "$c" set profiles.stream1.url 'rtsp://%s:554/ch3' >/dev/null
+	jct "$c" set profiles.stream1.snapurl '' >/dev/null
+	jct "$c" del profiles.webrtc >/dev/null 2>&1
+	chmod 644 "$c"
+}
+
+start() {
+	[ -f /etc/onvif.json ] || { echo "$DAEMON: no /etc/onvif.json"; return 1; }
+	ifconfig "$ALIAS_IF" "$ALIAS_IP" netmask "$ALIAS_MASK" up
+	setup_docroot
+	echo -n "Starting $DAEMON on $ALIAS_IP:80 and :$EXTRA_PORT: "
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/bin/uhttpd -- \
+		-f -h "$DOCROOT" -x /x -t 0 -T 15 -k 10 -n 5 -N 20 \
+		-p "$ALIAS_IP:80" -p "$EXTRA_PORT" && echo OK || echo FAIL
+	echo -n "Starting wsd-lens2 on $ALIAS_IF: "
+	/usr/sbin/wsd_simple_server -i "$ALIAS_IF" -x "http://%s/onvif/device_service" \
+		-n thingino -p "$WSD_PIDFILE" -u && echo OK || echo FAIL
+}
+
+stop() {
+	[ -f "$WSD_PIDFILE" ] && kill "$(cat "$WSD_PIDFILE")" 2>/dev/null
+	rm -f "$WSD_PIDFILE"
+	echo -n "Stopping $DAEMON: "
+	start-stop-daemon -K -q -p "$PIDFILE" && rm -f "$PIDFILE" && echo OK || echo FAIL
+	ifconfig "$ALIAS_IF" down 2>/dev/null
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
