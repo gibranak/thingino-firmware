@@ -1,0 +1,61 @@
+#!/bin/sh
+# Hardware-reset the camera when a main encoder stops producing frames
+# (IVDC overflow lock-up). Also keeps a short trend log for diagnosis.
+
+RINGS="main s1_main"
+INTERVAL=15
+LIMIT=4
+GRACE=120
+LOG=/tmp/stallwatch.log
+
+sig() {
+	head -c 128 "/dev/shm/rss_ring_$1" 2>/dev/null | md5sum | cut -c1-8
+}
+
+note() {
+	echo "$(date +%T) up=$(cut -d' ' -f1 /proc/uptime) $*" >>$LOG
+	tail -n 100 $LOG >$LOG.tmp && mv $LOG.tmp $LOG
+}
+
+while [ "$(cut -d. -f1 /proc/uptime)" -lt $GRACE ]; do sleep 10; done
+
+prev=""
+stale=0
+tick=0
+while sleep $INTERVAL; do
+	pidof rvd >/dev/null || {
+		prev=""
+		stale=0
+		continue
+	}
+	cur=""
+	for r in $RINGS; do cur="$cur $(sig $r)"; done
+	frozen=0
+	if [ -n "$prev" ]; then
+		set -- $prev
+		for s in $cur; do
+			[ "$s" = "$1" ] && frozen=1
+			shift
+		done
+	fi
+	prev="$cur"
+	if [ $frozen -eq 1 ]; then
+		stale=$((stale + 1))
+	else
+		stale=0
+	fi
+
+	tick=$((tick + 1))
+	if [ $((tick % 4)) -eq 0 ] || [ $stale -gt 0 ]; then
+		ovf=$(logcat -d 2>/dev/null | grep -c "An overflow")
+		note "ovf=$ovf stale=$stale load=$(cut -d' ' -f1 /proc/loadavg) free=$(awk '/MemFree/{print $2}' /proc/meminfo)"
+	fi
+
+	if [ $stale -ge $LIMIT ]; then
+		note "encoder stalled for $((stale * INTERVAL))s, hardware reset"
+		logger -t stallwatch "main encoder stalled $((stale * INTERVAL))s, hardware reset"
+		sync
+		sleep 2
+		echo 1 >/proc/jz/watchdog/reset
+	fi
+done
