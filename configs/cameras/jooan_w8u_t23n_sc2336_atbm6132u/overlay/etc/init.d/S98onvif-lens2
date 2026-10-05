@@ -1,26 +1,45 @@
 #!/bin/sh
-# Second ONVIF device for the Jooan W8-U's second lens (sensor 1: ch2/ch3).
-#
-# TP-Link VIGI NVRs accept one ONVIF device per IP and always use port 80,
-# so lens 2 gets its own IP on a wlan0 alias and its own uhttpd on
-# <alias>:80 (the main uhttpd binds wlan0's own address, see
-# /etc/default/uhttpd). The docroot holds symlinks to the stock ONVIF CGI
-# plus its own onvif.json, which the CGI prefers over /etc/onvif.json.
-# A second wsd_simple_server (-u, bound to the alias) answers WS-Discovery
-# probes for it. Runs after S96onvif_discovery, which generates
-# /etc/onvif.json and whose stop kills every wsd_simple_server.
-#
-# Set ALIAS_IP to a free address on the camera's subnet (reserve it on the
-# router).
+# Second ONVIF device for lens 2 (sensor 1: ch2/ch3) on its own IP.
+# The IP is wlan0's address + 1 unless ALIAS_IP is set in
+# /etc/default/onvif-lens2. Must run after S96onvif_discovery.
 
 DAEMON="uhttpd-lens2"
 PIDFILE="/var/run/uhttpd-lens2.pid"
 WSD_PIDFILE="/run/wsd_simple_server_lens2.pid"
 DOCROOT="/var/www-lens2"
+BASE_IF="wlan0"
 ALIAS_IF="wlan0:1"
-ALIAS_IP="192.168.1.85"
-ALIAS_MASK="255.255.255.0"
+ALIAS_IP=""
 EXTRA_PORT="8080"
+
+[ -r /etc/default/onvif-lens2 ] && . /etc/default/onvif-lens2
+
+base_cidr() {
+	ip -4 addr show "$BASE_IF" 2>/dev/null |
+		awk -v ifn="$BASE_IF" '$1 == "inet" && $NF == ifn { print $2; exit }'
+}
+
+pick_alias() {
+	i=0
+	cidr=$(base_cidr)
+	while [ -z "$cidr" ] && [ $i -lt 30 ]; do
+		sleep 1
+		i=$((i + 1))
+		cidr=$(base_cidr)
+	done
+	[ -n "$cidr" ] || return 1
+	PREFIX=${cidr#*/}
+	if [ -z "$ALIAS_IP" ]; then
+		base=${cidr%/*}
+		last=${base##*.}
+		[ "$last" -lt 254 ] || return 1
+		ALIAS_IP="${base%.*}.$((last + 1))"
+	fi
+	if ! arping -D -q -c 2 -I "$BASE_IF" "$ALIAS_IP" >/dev/null 2>&1; then
+		echo "$DAEMON: $ALIAS_IP is already in use on the network"
+		return 1
+	fi
+}
 
 setup_docroot() {
 	mkdir -p "$DOCROOT/onvif"
@@ -35,8 +54,8 @@ setup_docroot() {
 		fi
 	done
 
-	# Profile names must stay Profile_0/Profile_1: GetProfiles hands out
-	# those tokens and GetStreamUri looks profiles up by name.
+	# GetProfiles hands out Profile_0/Profile_1 and GetStreamUri looks
+	# profiles up by name, so the names must stay as they are.
 	c="$DOCROOT/onvif/onvif.json"
 	cp /etc/onvif.json "$c"
 	jct "$c" set server.port 80 >/dev/null
@@ -52,8 +71,15 @@ setup_docroot() {
 }
 
 start() {
-	[ -f /etc/onvif.json ] || { echo "$DAEMON: no /etc/onvif.json"; return 1; }
-	ifconfig "$ALIAS_IF" "$ALIAS_IP" netmask "$ALIAS_MASK" up
+	[ -f /etc/onvif.json ] || {
+		echo "$DAEMON: no /etc/onvif.json"
+		return 1
+	}
+	pick_alias || {
+		echo "$DAEMON: no usable address for $ALIAS_IF, not starting"
+		return 1
+	}
+	ip addr add "$ALIAS_IP/$PREFIX" dev "$BASE_IF" label "$ALIAS_IF" 2>/dev/null
 	setup_docroot
 	echo -n "Starting $DAEMON on $ALIAS_IP:80 and :$EXTRA_PORT: "
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/bin/uhttpd -- \
@@ -69,12 +95,21 @@ stop() {
 	rm -f "$WSD_PIDFILE"
 	echo -n "Stopping $DAEMON: "
 	start-stop-daemon -K -q -p "$PIDFILE" && rm -f "$PIDFILE" && echo OK || echo FAIL
-	ifconfig "$ALIAS_IF" down 2>/dev/null
+	ip -4 addr show label "$ALIAS_IF" |
+		awk '$1 == "inet" { print $2 }' |
+		while read -r a; do ip addr del "$a" dev "$BASE_IF"; done
 }
 
 case "$1" in
-	start) start ;;
-	stop) stop ;;
-	restart) stop; sleep 1; start ;;
-	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+start) start ;;
+stop) stop ;;
+restart)
+	stop
+	sleep 1
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
 esac
