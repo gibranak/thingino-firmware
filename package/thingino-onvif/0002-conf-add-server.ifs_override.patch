@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gibranak <gibranhostel@gmail.com>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] conf: add server.ifs_override
+
+The interface used for XAddrs and stream URIs always follows the default
+route, and server.ifs is only a fallback. A dual-lens camera exposes its
+second lens as a second ONVIF device on an IP alias (e.g. wlan0:1),
+because some NVRs (TP-Link VIGI) allow one ONVIF device per IP. That
+device must advertise the alias address, so let its config pin the
+interface. Configs without the key behave as before.
+
+--- a/src/conf.c
++++ b/src/conf.c
+@@ -894,7 +894,11 @@
+     // The primary interface is whatever the routing table says right now
+     // (per request for the CGI, at start for the notify daemon); the config
+     // server.ifs is only a fallback when there is no default route.
+-    if (get_default_iface(stmp, sizeof(stmp)) == 0) {
++    // server.ifs_override pins the interface (e.g. an alias like wlan0:1
++    // that gives a second ONVIF device on the same camera its own IP).
++    if (server_section && get_object_item(server_section, "ifs_override")) {
++        get_string_from_json(&(service_ctx.ifs), server_section, "ifs_override");
++    } else if (get_default_iface(stmp, sizeof(stmp)) == 0) {
+         service_ctx.ifs = dup_cstring(stmp);
+     } else if (server_section && get_object_item(server_section, "ifs")) {
+         get_string_from_json(&(service_ctx.ifs), server_section, "ifs");
