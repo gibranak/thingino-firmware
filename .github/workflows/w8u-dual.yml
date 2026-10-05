@@ -1,0 +1,90 @@
+name: w8u-dual
+on:
+  push:
+    branches:
+      - w8u-dual
+  workflow_dispatch:
+
+env:
+  BOARD: jooan_w8u_t23n_sc2336_atbm6132u
+  FORCE_UNSAFE_CONFIGURE: 1
+  TERM: linux
+  TZ: UTC
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: ghcr.io/themactep/thingino-builder-image:latest
+      options: --user root --volume /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Setup gh workspace to container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Use GNU coreutils install (workaround for uutils bug)
+        run: update-alternatives --install /usr/bin/install install /usr/bin/gnuinstall 100 || true
+
+      - name: Install Docker CLI (fallback until image is rebuilt)
+        run: |
+          if ! command -v docker &>/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends docker-cli
+          fi
+
+      - name: Checkout repository source
+        uses: actions/checkout@v5
+        with:
+          submodules: 'true'
+          fetch-depth: "1"
+
+      - name: Setup cache directories
+        run: |
+          mkdir -p ~/.buildroot-ccache
+          mkdir -p ~/dl
+
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.buildroot-ccache
+          key: ${{ runner.os }}-ccache-${{ env.BOARD }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ env.BOARD }}-
+
+      - name: Restore buildroot-dl-cache from image
+        continue-on-error: true
+        run: |
+          docker pull ghcr.io/themactep/thingino-dl:latest
+          DL_CID=$(docker create ghcr.io/themactep/thingino-dl:latest)
+          docker cp "$DL_CID:/dl" ~/dl
+          docker rm "$DL_CID"
+
+      - name: Build firmware
+        run: BOARD=${BOARD} make fast WORKFLOW=1
+
+      - name: Show generated module and streamer config
+        if: always()
+        run: |
+          T=$(find output -maxdepth 3 -type d -name target -path "*${BOARD}*" | head -n 1)
+          echo "target: $T"
+          for f in $T/etc/modules.d/20-isp $T/etc/modules.d/30-sensor*; do echo "== $f"; cat "$f" || true; done
+          echo "== raptor.conf (sensor/mipi sections)"
+          sed -n '/^\[sensor0\]/,/^\[stream0\]/p' $T/etc/raptor.conf || true
+
+      - name: Collect firmware
+        run: |
+          FW=$(find output -path "*${BOARD}*/images/*" -name "thingino-${BOARD}.bin" ! -name "*update.bin" | head -n 1)
+          UP=$(find output -path "*${BOARD}*/images/*" -name "thingino-${BOARD}-update.bin" | head -n 1)
+          [ -n "$FW" ] || { echo "firmware not found"; find output -name "*.bin" | head; exit 1; }
+          mkdir -p dist
+          cp "$FW" dist/
+          [ -n "$UP" ] && cp "$UP" dist/ || true
+          (cd dist && sha256sum * | tee SHA256SUMS)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: thingino-${{ env.BOARD }}-${{ github.sha }}
+          path: dist/

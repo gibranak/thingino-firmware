@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gibranak <gibranhostel@gmail.com>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] t23: sc2336ps0/ps1 - accept 0xcb chip ID, settle 10ms before ID read
+
+Some SC2336P parts report chip ID 0xcb3a (0x3107 = 0xcb) instead of
+0x9b3a. Confirmed on the Jooan W8-U (T23N, 2x SC2336P @ 0x30/0x32): the
+vendor sc2336p.ko accepts either 0x9b or 0xcb, while these drivers only
+accepted 0x9b, so probing failed with "not an sc2336p chip".
+
+Also wait 10ms (vendor value) instead of 1ms between stream-on and the
+chip-ID read; the 1ms read is unreliable on this board.
+
+diff --git a/3.10.14/sensor-src/t23/sc2336ps0.c b/3.10.14/sensor-src/t23/sc2336ps0.c
+index 47752a2..2e5f0b1 100644
+--- a/3.10.14/sensor-src/t23/sc2336ps0.c
++++ b/3.10.14/sensor-src/t23/sc2336ps0.c
+@@ -33,6 +33,7 @@
+ // ============================================================================
+ #define SENSOR_VERSION "H20230921a"
+ #define SENSOR_CHIP_ID_H (0x9b)
++#define SENSOR_CHIP_ID_H_ALT (0xcb) /* SC2336P variant (chip ID 0xcb3a), e.g. Jooan W8-U */
+ #define SENSOR_CHIP_ID_L (0x3a)
+ #define SENSOR_CHIP_ID ((SENSOR_CHIP_ID_H << 8) | SENSOR_CHIP_ID_L)
+ 
+@@ -610,13 +611,13 @@ static int sensor_detect(struct tx_isp_subdev *sd, unsigned int *ident)
+ 
+         ret = sensor_write(sd, 0x301a, 0xf8);
+         ret += sensor_write(sd, 0x0100, 0x01);
+-        private_msleep(1);
++        private_msleep(10);
+ 
+ 	ret += sensor_read(sd, 0x3107, &v);
+ 	ISP_WARNING("-----%s: %d ret = %d, v = 0x%02x\n", __func__, __LINE__, ret,v);
+ 	if (ret < 0)
+ 		return ret;
+-	if (v != SENSOR_CHIP_ID_H)
++	if (v != SENSOR_CHIP_ID_H && v != SENSOR_CHIP_ID_H_ALT)
+ 		return -ENODEV;
+ 	*ident = v;
+ 
+diff --git a/3.10.14/sensor-src/t23/sc2336ps1.c b/3.10.14/sensor-src/t23/sc2336ps1.c
+index 7935aa3..86b9059 100644
+--- a/3.10.14/sensor-src/t23/sc2336ps1.c
++++ b/3.10.14/sensor-src/t23/sc2336ps1.c
+@@ -32,6 +32,7 @@
+ // ============================================================================
+ #define SENSOR_VERSION "H20230926a"
+ #define SENSOR_CHIP_ID_H (0x9b)
++#define SENSOR_CHIP_ID_H_ALT (0xcb) /* SC2336P variant (chip ID 0xcb3a), e.g. Jooan W8-U */
+ #define SENSOR_CHIP_ID_L (0x3a)
+ 
+ // ============================================================================
+@@ -614,13 +615,13 @@ static int sensor_detect(struct tx_isp_subdev *sd, unsigned int *ident)
+ 
+         ret = sensor_write(sd, 0x301a, 0xf8);
+         ret += sensor_write(sd, 0x0100, 0x01);
+-        private_msleep(1);
++        private_msleep(10);
+ 
+ 	ret += sensor_read(sd, 0x3107, &v);
+ 	ISP_WARNING("-----%s: %d ret = %d, v = 0x%02x\n", __func__, __LINE__, ret,v);
+ 	if (ret < 0)
+ 		return ret;
+-	if (v != SENSOR_CHIP_ID_H)
++	if (v != SENSOR_CHIP_ID_H && v != SENSOR_CHIP_ID_H_ALT)
+ 		return -ENODEV;
+ 	*ident = v;
+ 
+-- 
+2.43.0
