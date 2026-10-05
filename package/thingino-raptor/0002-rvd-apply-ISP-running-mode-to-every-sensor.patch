@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gibranak <gibranhostel@gmail.com>
+Date: Tue, 6 Oct 2026 00:00:00 +0000
+Subject: [PATCH] rvd: apply ISP running mode to every sensor
+
+set-running-mode (sent by ric on day/night switches) only reached
+sensor 0. On a dual-sensor T23 (Jooan W8-U) the second lens stayed in
+colour mode at night and showed a pink IR-lit image. Use the per-sensor
+HAL call for every sensor, as rvd_apply_sensor_fps already does.
+
+--- a/rvd/rvd_ctrl.c
++++ b/rvd/rvd_ctrl.c
+@@ -1270,7 +1270,13 @@
+ 		char mode_str[8];
+ 		if (rss_json_get_str(cmd_json, "value", mode_str, sizeof(mode_str)) == 0) {
+ 			int mode = (strcmp(mode_str, "night") == 0) ? 1 : 0;
+-			RSS_HAL_CALL(st->ops, isp_set_running_mode, st->hal_ctx, mode);
++			if (st->sensor_count > 1 && st->ops->isp_set_running_mode_n) {
++				for (int s = 0; s < st->sensor_count; s++)
++					RSS_HAL_CALL(st->ops, isp_set_running_mode_n, st->hal_ctx, s,
++						     mode);
++			} else {
++				RSS_HAL_CALL(st->ops, isp_set_running_mode, st->hal_ctx, mode);
++			}
+ 			cJSON *r = cJSON_CreateObject();
+ 			cJSON_AddStringToObject(r, "status", "ok");
+ 			cJSON_AddStringToObject(r, "mode", mode ? "night" : "day");
