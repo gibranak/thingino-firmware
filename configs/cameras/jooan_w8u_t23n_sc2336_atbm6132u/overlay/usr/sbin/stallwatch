@@ -69,7 +69,12 @@ while sleep $INTERVAL; do
 	tick=$((tick + 1))
 	if [ $((tick % 4)) -eq 0 ] || [ $stale -gt 0 ]; then
 		ovf=$(logcat -d 2>/dev/null | grep -c "An overflow")
-		note "ovf=$ovf stale=$stale load=$(cut -d' ' -f1 /proc/loadavg) free=$(awk '/MemFree/{print $2}' /proc/meminfo)"
+		vic=$(dmesg | grep -c "ver err")
+		dn=$(raptorctl ric status 2>/dev/null |
+			sed -n 's/.*"state":"\([a-z]*\)".*"exposure_us":\([0-9]*\).*/\1 exp=\2/p')
+		fps=$(raptorctl rvd get-sensor-fps 2>/dev/null |
+			sed -n 's/.*"fps_num":\([0-9]*\).*/\1/p')
+		note "ovf=$ovf vic=$vic $dn fps=$fps stale=$stale load=$(cut -d' ' -f1 /proc/loadavg) free=$(awk '/MemFree/{print $2}' /proc/meminfo)"
 	fi
 
 	if [ $stale -ge $LIMIT ]; then
