@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gibranak <gibranhostel@gmail.com>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] events: tolerate missing MessageID in Subscribe
+
+Some NVRs (seen with a TP-Link NVR) send Subscribe without a WS-Addressing
+MessageID header. Subscribe then returned a fault *after* the subscription
+had already been created, so the NVR retried every ~2s: one orphaned
+subscription and an error line per retry, flooding the 64KB syslog.
+
+Handle it the way Renew already does: generate a UUID for RelatesTo.
+
+--- a/src/events_service.c
++++ b/src/events_service.c
+@@ -697,9 +697,13 @@
+ 
+     relates_to_uuid = get_element("MessageID", "Header");
+     if (relates_to_uuid == NULL) {
+-        log_error("No MessageID element for Subscribe method");
+-        send_action_failed_fault("events_service", -6);
+-        return -6;
++        // Be tolerant, as Renew is: some NVRs (e.g. TP-Link) omit MessageID.
++        // Failing here left the subscription already created above, and the
++        // client retried every few seconds, flooding the log and the table.
++        log_warn("Subscribe: missing MessageID; generating one for RelatesTo");
++        static char sub_rel_uuid_buf[UUID_LEN + 1];
++        gen_uuid(sub_rel_uuid_buf);
++        relates_to_uuid = sub_rel_uuid_buf;
+     }
+ 
+     to_iso_date(iso_str, sizeof(iso_str), now);
