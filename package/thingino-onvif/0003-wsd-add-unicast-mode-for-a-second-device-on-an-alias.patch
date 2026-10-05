@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gibranak <gibranhostel@gmail.com>
+Date: Mon, 5 Oct 2026 00:00:00 +0000
+Subject: [PATCH] wsd: add unicast mode for a second device on an IP alias
+
+A dual-lens camera exposes its second lens as a second ONVIF device on an
+IP alias (e.g. wlan0:1). NVRs such as the TP-Link VIGI first send a
+unicast WS-Discovery Probe to the IP being added; the single wsd instance
+(bound to INADDR_ANY) answered for the alias with the primary address and
+the primary device UUID, so the NVR merged the second lens into the first.
+
+-u binds a wsd instance to the interface address only and skips the
+multicast group, so it answers unicast probes for that address with its
+own XAddrs and UUID. SO_REUSEADDR lets it share port 3702 with the
+INADDR_ANY instance, and the RNG seed now mixes in the pid so two
+instances started in the same second get different device UUIDs.
+
+--- a/src/wsd_simple_server.c
++++ b/src/wsd_simple_server.c
+@@ -298,7 +298,7 @@
+ 
+ void print_usage(char *progname)
+ {
+-    fprintf(stderr, "\nUsage: %s -i INTERFACE -x XADDR [-m MODEL] [-n MANUFACTURER] -p PID_FILE [-f] [-d LEVEL]\n\n", progname);
++    fprintf(stderr, "\nUsage: %s -i INTERFACE -x XADDR [-m MODEL] [-n MANUFACTURER] -p PID_FILE [-u] [-f] [-d LEVEL]\n\n", progname);
+     fprintf(stderr, "\t-i, --if_name\n");
+     fprintf(stderr, "\t\tnetwork interface\n");
+     fprintf(stderr, "\t-x, --xaddr\n");
+@@ -309,6 +309,9 @@
+     fprintf(stderr, "\t\thardware manufacturer\n");
+     fprintf(stderr, "\t-p, --pid_file\n");
+     fprintf(stderr, "\t\tpid file\n");
++    fprintf(stderr, "\t-u, --unicast\n");
++    fprintf(stderr, "\t\tbind to the interface address only, no multicast (second\n");
++    fprintf(stderr, "\t\tONVIF device on an IP alias, e.g. -i wlan0:1)\n");
+     fprintf(stderr, "\t-f, --foreground\n");
+     fprintf(stderr, "\t\tdon't daemonize\n");
+     fprintf(stderr, "\t-d LEVEL, --debug LEVEL\n");
+@@ -326,6 +329,7 @@
+     char *pid_file;
+     char *xaddr_s;
+     int foreground;
++    int unicast;
+     char s_tmp[32];
+     const char *method;
+ 
+@@ -341,6 +345,7 @@
+     strcpy(model, "MODEL_NAME");
+     strcpy(hardware, "HARDWARE_MANUFACTURER");
+     foreground = 0;
++    unicast = 0;
+     debug = 0;
+ 
+     while (1) {
+@@ -350,13 +355,14 @@
+                                                {"model", required_argument, 0, 'm'},
+                                                {"hardware", required_argument, 0, 'n'},
+                                                {"foreground", no_argument, 0, 'f'},
++                                               {"unicast", no_argument, 0, 'u'},
+                                                {"debug", required_argument, 0, 'd'},
+                                                {"help", no_argument, 0, 'h'},
+                                                {0, 0, 0, 0}};
+         /* getopt_long stores the option index here. */
+         int option_index = 0;
+ 
+-        c = getopt_long(argc, argv, "i:p:x:m:n:fd:h", long_options, &option_index);
++        c = getopt_long(argc, argv, "i:p:x:m:n:fud:h", long_options, &option_index);
+ 
+         /* Detect the end of the options. */
+         if (c == -1)
+@@ -397,6 +403,10 @@
+             foreground = 1;
+             break;
+ 
++        case 'u':
++            unicast = 1;
++            break;
++
+         case 'd':
+             debug = strtol(optarg, &endptr, 10);
+ 
+@@ -511,7 +521,9 @@
+         exit(EXIT_FAILURE);
+     }
+ 
+-    srand((unsigned int) time(NULL));
++    // Mix in the pid: two instances (e.g. -u on an alias) started in the same
++    // second must not generate the same device UUID.
++    srand((unsigned int) time(NULL) ^ ((unsigned int) getpid() << 16));
+ 
+     // Configure socket
+     memset(&addr_in, '\0', sizeof(addr_in));
+@@ -548,6 +560,15 @@
+         exit(EXIT_FAILURE);
+     }
+ 
++    // Let a -u instance bound to an alias address share the port with the
++    // instance bound to INADDR_ANY (Linux needs SO_REUSEADDR on both).
++    int reuse = 1;
++    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
++    if (unicast) {
++        addr_in.sin_addr.s_addr = inet_addr(address);
++        log_info("Unicast mode: bound to %s only", address);
++    }
++
+     if (bind(sock, (struct sockaddr *) &addr_in, sizeof(addr_in)) == -1) {
+         log_fatal("Unable to bind socket\n");
+         shutdown(sock, SHUT_RDWR);
+@@ -557,7 +578,7 @@
+ 
+     mr.imr_multiaddr.s_addr = inet_addr(MULTICAST_ADDRESS);
+     mr.imr_interface.s_addr = inet_addr(address);
+-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *) &mr, sizeof(mr)) == -1) {
++    if (!unicast && setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *) &mr, sizeof(mr)) == -1) {
+         log_fatal("Error joining multicast group\n");
+         shutdown(sock, SHUT_RDWR);
+         close(sock);
