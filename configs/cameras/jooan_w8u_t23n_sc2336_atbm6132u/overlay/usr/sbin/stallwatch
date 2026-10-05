@@ -7,6 +7,8 @@ INTERVAL=15
 LIMIT=4
 GRACE=120
 LOG=/tmp/stallwatch.log
+SD=/mnt/mmcblk0p1
+SDDIR=""
 
 sig() {
 	head -c 128 "/dev/shm/rss_ring_$1" 2>/dev/null | md5sum | cut -c1-8
@@ -15,8 +17,27 @@ sig() {
 note() {
 	echo "$(date +%T) up=$(cut -d' ' -f1 /proc/uptime) $*" >>$LOG
 	tail -n 100 $LOG >$LOG.tmp && mv $LOG.tmp $LOG
+	[ -n "$SDDIR" ] && echo "$(date +%T) up=$(cut -d' ' -f1 /proc/uptime) $*" >>"$SDDIR/trend.txt"
 }
 
+sd_logging() {
+	i=0
+	while ! grep -q " $SD " /proc/mounts; do
+		i=$((i + 1))
+		[ $i -gt 60 ] && return 0
+		sleep 1
+	done
+	mkdir -p "$SD/camlog" || return 0
+	ls -td "$SD"/camlog/boot-* 2>/dev/null | awk 'NR>4' | xargs rm -rf 2>/dev/null
+	SDDIR="$SD/camlog/boot-$(date +%Y%m%d-%H%M%S)"
+	mkdir -p "$SDDIR"
+	dmesg >"$SDDIR/dmesg-boot.txt"
+	grep -m1 "RESET ERROR" "$SDDIR/dmesg-boot.txt" >>"$SD/camlog/reset-pc.txt"
+	logread -f >>"$SDDIR/syslog.txt" &
+	cat /proc/kmsg >>"$SDDIR/kmsg.txt" &
+}
+
+sd_logging
 while [ "$(cut -d. -f1 /proc/uptime)" -lt $GRACE ]; do sleep 10; done
 
 prev=""
@@ -53,6 +74,10 @@ while sleep $INTERVAL; do
 
 	if [ $stale -ge $LIMIT ]; then
 		note "encoder stalled for $((stale * INTERVAL))s, hardware reset"
+		if [ -n "$SDDIR" ]; then
+			logcat -d >"$SDDIR/logcat-at-reset.txt" 2>&1
+			dmesg | tail -n 80 >"$SDDIR/dmesg-at-reset.txt"
+		fi
 		logger -t stallwatch "main encoder stalled $((stale * INTERVAL))s, hardware reset"
 		sync
 		sleep 2
