@@ -6,6 +6,7 @@
 DAEMON="uhttpd-lens2"
 PIDFILE="/var/run/uhttpd-lens2.pid"
 WSD_PIDFILE="/run/wsd_simple_server_lens2.pid"
+ARP_PIDFILE="/run/arp-lens2.pid"
 DOCROOT="/var/www-lens2"
 BASE_IF="wlan0"
 ALIAS_IF="wlan0:1"
@@ -80,6 +81,9 @@ start() {
 		return 1
 	}
 	ip addr add "$ALIAS_IP/$PREFIX" dev "$BASE_IF" label "$ALIAS_IF" 2>/dev/null
+	# Wi-Fi extenders proxy ARP only for addresses they have learned.
+	start-stop-daemon -S -q -b -m -p "$ARP_PIDFILE" -x /bin/sh -- -c \
+		"while :; do arping -U -c 2 -I $BASE_IF -s $ALIAS_IP $ALIAS_IP >/dev/null 2>&1; sleep 300; done"
 	setup_docroot
 	echo -n "Starting $DAEMON on $ALIAS_IP:80 and :$EXTRA_PORT: "
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/bin/uhttpd -- \
@@ -93,6 +97,8 @@ start() {
 stop() {
 	[ -f "$WSD_PIDFILE" ] && kill "$(cat "$WSD_PIDFILE")" 2>/dev/null
 	rm -f "$WSD_PIDFILE"
+	start-stop-daemon -K -q -p "$ARP_PIDFILE" 2>/dev/null
+	rm -f "$ARP_PIDFILE"
 	echo -n "Stopping $DAEMON: "
 	start-stop-daemon -K -q -p "$PIDFILE" && rm -f "$PIDFILE" && echo OK || echo FAIL
 	ip -4 addr show label "$ALIAS_IF" |
