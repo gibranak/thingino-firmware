@@ -89,6 +89,14 @@ start() {
 	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/bin/uhttpd -- \
 		-f -h "$DOCROOT" -x /x -t 0 -T 15 -k 10 -n 5 -N 20 \
 		-p "$ALIAS_IP:80" -p "$EXTRA_PORT" && echo OK || echo FAIL
+	# S96onvif_discovery sometimes loses a pidfile race ("Program is already
+	# running") and the main responder exits; the alias responder relies on it.
+	if ! ps | grep -q "[w]sd_simple_server -i $BASE_IF "; then
+		echo -n "Starting wsd on $BASE_IF: "
+		rm -f "/run/wsd_simple_server_$BASE_IF.pid"
+		/usr/sbin/wsd_simple_server -i "$BASE_IF" -x "http://%s/onvif/device_service" \
+			-n thingino -p "/run/wsd_simple_server_$BASE_IF.pid" && echo OK || echo FAIL
+	fi
 	echo -n "Starting wsd-lens2 on $ALIAS_IF: "
 	/usr/sbin/wsd_simple_server -i "$ALIAS_IF" -x "http://%s/onvif/device_service" \
 		-n thingino -p "$WSD_PIDFILE" -u && echo OK || echo FAIL
